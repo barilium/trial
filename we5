@@ -1,0 +1,277 @@
+-- Kanistay Key Validator v1.0 (Modern, sade, Supabase tabanlı)
+
+-- Supabase config
+local SUPABASE_URL = "https://nheljqlonhodbgpcfkww.supabase.co"
+local SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5oZWxqcWxvbmhvZGJncGNma3d3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTE5NzQ2MjQsImV4cCI6MjA2NzU1MDYyNH0.MtcA4YjKFWKsSPQMUG-SXOA1Ue1dml6v5Urdr0ISMnQ"
+
+local function getHeaders()
+    return {
+        ["apikey"] = SUPABASE_ANON_KEY,
+        ["Authorization"] = "Bearer " .. SUPABASE_ANON_KEY,
+        ["Content-Type"] = "application/json"
+    }
+end
+
+local function getSystemInfo()
+    local Players = game:GetService("Players")
+    local player = Players.LocalPlayer
+    local hwid = ""
+    pcall(function()
+        hwid = game:GetService("RbxAnalyticsService"):GetClientId()
+    end)
+    local executor = "Unknown"
+    pcall(function()
+        if identifyexecutor then
+            executor = identifyexecutor()
+        elseif getexecutorname then
+            executor = getexecutorname()
+        end
+    end)
+    return {
+        username = player.Name,
+        displayname = player.DisplayName,
+        hwid = hwid,
+        executor = executor,
+        account_age = player.AccountAge,
+        userId = player.UserId
+    }
+end
+
+local function fetchToken()
+    local res = request({
+        Url = SUPABASE_URL .. "/rest/v1/tokens?select=token_value&limit=1",
+        Method = "GET",
+        Headers = getHeaders()
+    })
+    if res.StatusCode == 200 then
+        local HttpService = game:GetService("HttpService")
+        local data = HttpService:JSONDecode(res.Body)
+        if data[1] and data[1].token_value then
+            return data[1].token_value
+        end
+    end
+    return nil
+end
+
+local function fetchSystemSettings()
+    local res = request({
+        Url = SUPABASE_URL .. "/rest/v1/system_settings",
+        Method = "GET",
+        Headers = getHeaders()
+    })
+    if res.StatusCode == 200 then
+        local HttpService = game:GetService("HttpService")
+        local data = HttpService:JSONDecode(res.Body)
+        local settings = {}
+        for _, row in ipairs(data) do
+            settings[row.setting_key] = row.setting_value
+        end
+        return settings
+    end
+    return nil
+end
+
+local function fetchNotification(event_type)
+    local res = request({
+        Url = SUPABASE_URL .. "/rest/v1/system_notifications?event_type=eq." .. event_type,
+        Method = "GET",
+        Headers = getHeaders()
+    })
+    if res.StatusCode == 200 then
+        local HttpService = game:GetService("HttpService")
+        local data = HttpService:JSONDecode(res.Body)
+        if data[1] then
+            return data[1]
+        end
+    end
+    return {title="System", message="Unknown event", icon="ℹ️", color="blue"}
+end
+
+local function checkAdvancedKeys(hwid)
+    local res = request({
+        Url = SUPABASE_URL .. "/rest/v1/advanced_keys?hwid=eq." .. hwid,
+        Method = "GET",
+        Headers = getHeaders()
+    })
+    if res.StatusCode == 200 then
+        local HttpService = game:GetService("HttpService")
+        local data = HttpService:JSONDecode(res.Body)
+        if data[1] then
+            return data[1]
+        end
+    end
+    return nil
+end
+
+local function checkNormalKey(key)
+    local res = request({
+        Url = SUPABASE_URL .. "/rest/v1/normal_keys?key_value=eq." .. key,
+        Method = "GET",
+        Headers = getHeaders()
+    })
+    if res.StatusCode == 200 then
+        local HttpService = game:GetService("HttpService")
+        local data = HttpService:JSONDecode(res.Body)
+        if data[1] then
+            return data[1]
+        end
+    end
+    return nil
+end
+
+local function updateNormalKey(keyId, info)
+    local HttpService = game:GetService("HttpService")
+    request({
+        Url = SUPABASE_URL .. "/rest/v1/normal_keys?id=eq." .. keyId,
+        Method = "PATCH",
+        Headers = getHeaders(),
+        Body = HttpService:JSONEncode(info)
+    })
+end
+
+local Validator = {}
+
+local hazirmiyiz = false
+
+local OrionLib = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kanistay/Storage/refs/heads/main/readme"))()
+
+local validateAttempts = {}
+local validateWindow = 30 -- saniye
+local validateLimit = 4
+
+local function showNotification(notification)
+    OrionLib:MakeNotification({
+        Name = notification.title,
+        Content = notification.message,
+        Image = "rbxassetid://4483345998",
+        Time = 6
+    })
+end
+
+local function showInputEmptyNotification()
+    local StarterGui = game:GetService("StarterGui")
+    StarterGui:SetCore("SendNotification", {
+        Title = "Key input is empty",
+        Text = "Please enter a key before validating.",
+        Duration = 2.5
+    })
+end
+
+function Validator.Setup(token)
+    local dbToken = fetchToken()
+    if not dbToken or dbToken ~= token then
+        showNotification(fetchNotification("network_error"))
+        return
+    end
+    local settings = fetchSystemSettings()
+    if not settings then
+        showNotification(fetchNotification("network_error"))
+        return
+    end
+    if settings.maintenance_mode then
+        showNotification(fetchNotification("system_disabled"))
+        return
+    end
+    local info = getSystemInfo()
+    local adv = checkAdvancedKeys(info.hwid)
+    if adv then
+        if adv.is_premium then
+            hazirmiyiz = true
+            showNotification(fetchNotification("user_premium"))
+            return
+        else
+            showNotification(fetchNotification("user_banned"))
+            return
+        end
+    end
+    if settings.is_keyless then
+        hazirmiyiz = true
+        showNotification(fetchNotification("system_keyless"))
+        return
+    end
+    hazirmiyiz = true
+    showNotification(fetchNotification("setup_complete"))
+end
+
+function Validator.ValidateKey(token, key)
+    -- Rate limit kontrolü
+    local now = os.time()
+    local userId = tostring(game:GetService("Players").LocalPlayer.UserId)
+    if not validateAttempts[userId] then
+        validateAttempts[userId] = {}
+    end
+    -- Eski denemeleri temizle
+    for i = #validateAttempts[userId], 1, -1 do
+        if now - validateAttempts[userId][i] > validateWindow then
+            table.remove(validateAttempts[userId], i)
+        end
+    end
+    if #validateAttempts[userId] >= validateLimit then
+        showNotification({title = "Rate Limit", message = "You can only validate 4 times every 30 seconds.", icon = "⏳", color = "red"})
+        return
+    end
+    table.insert(validateAttempts[userId], now)
+    -- Key input boşsa
+    if not key or key == "" then
+        showInputEmptyNotification()
+        return
+    end
+    local dbToken = fetchToken()
+    if not dbToken or dbToken ~= token then
+        showNotification(fetchNotification("network_error"))
+        return
+    end
+    local settings = fetchSystemSettings()
+    if not settings then
+        showNotification(fetchNotification("network_error"))
+        return
+    end
+    if settings.maintenance_mode then
+        showNotification(fetchNotification("system_disabled"))
+        return
+    end
+    local info = getSystemInfo()
+    local adv = checkAdvancedKeys(info.hwid)
+    if adv then
+        if adv.is_premium then
+            hazirmiyiz = true
+            showNotification(fetchNotification("user_premium"))
+            return
+        else
+            showNotification(fetchNotification("user_banned"))
+            return
+        end
+    end
+    if settings.is_keyless then
+        hazirmiyiz = true
+        showNotification(fetchNotification("system_keyless"))
+        return
+    end
+    local keyData = checkNormalKey(key)
+    if not keyData then
+        showNotification(fetchNotification("key_invalid"))
+        return
+    end
+    if settings.is_hwid_check then
+        if keyData.hwid and keyData.hwid ~= info.hwid then
+            showNotification(fetchNotification("hwid_mismatch"))
+            return
+        end
+    end
+    updateNormalKey(keyData.id, {
+        user_id = info.username,
+        display_name = info.displayname,
+        hwid = info.hwid,
+        executor = info.executor,
+        used_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    })
+    hazirmiyiz = true
+    showNotification(fetchNotification("user_validated"))
+end
+
+function Validator.loader()
+    if not hazirmiyiz then return end
+    -- put your code in here
+end
+
+return Validator
