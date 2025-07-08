@@ -1,0 +1,236 @@
+-- Kanistay Key Validator v1.0 (Modern, sade, Supabase tabanlı)
+
+-- Supabase config
+local SUPABASE_URL = "https://nheljqlonhodbgpcfkww.supabase.co"
+local SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5oZWxqcWxvbmhvZGJncGNma3d3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTE5NzQ2MjQsImV4cCI6MjA2NzU1MDYyNH0.MtcA4YjKFWKsSPQMUG-SXOA1Ue1dml6v5Urdr0ISMnQ"
+
+local function getHeaders()
+    return {
+        ["apikey"] = SUPABASE_ANON_KEY,
+        ["Authorization"] = "Bearer " .. SUPABASE_ANON_KEY,
+        ["Content-Type"] = "application/json"
+    }
+end
+
+local function getSystemInfo()
+    local Players = game:GetService("Players")
+    local player = Players.LocalPlayer
+    local hwid = ""
+    pcall(function()
+        hwid = game:GetService("RbxAnalyticsService"):GetClientId()
+    end)
+    local executor = "Unknown"
+    pcall(function()
+        if identifyexecutor then
+            executor = identifyexecutor()
+        elseif getexecutorname then
+            executor = getexecutorname()
+        end
+    end)
+    return {
+        username = player.Name,
+        displayname = player.DisplayName,
+        hwid = hwid,
+        executor = executor,
+        account_age = player.AccountAge,
+        userId = player.UserId
+    }
+end
+
+local function fetchToken()
+    local res = request({
+        Url = SUPABASE_URL .. "/rest/v1/tokens?select=token_value&limit=1",
+        Method = "GET",
+        Headers = getHeaders()
+    })
+    if res.Success and res.StatusCode == 200 then
+        local HttpService = game:GetService("HttpService")
+        local data = HttpService:JSONDecode(res.Body)
+        if data[1] and data[1].token_value then
+            return data[1].token_value
+        end
+    end
+    return nil
+end
+
+local function fetchSystemSettings()
+    local res = request({
+        Url = SUPABASE_URL .. "/rest/v1/system_settings",
+        Method = "GET",
+        Headers = getHeaders()
+    })
+    if res.Success and res.StatusCode == 200 then
+        local HttpService = game:GetService("HttpService")
+        local data = HttpService:JSONDecode(res.Body)
+        local settings = {}
+        for _, row in ipairs(data) do
+            settings[row.setting_key] = row.setting_value
+        end
+        return settings
+    end
+    return nil
+end
+
+local function fetchNotification(event_type)
+    local res = request({
+        Url = SUPABASE_URL .. "/rest/v1/system_notifications?event_type=eq." .. event_type,
+        Method = "GET",
+        Headers = getHeaders()
+    })
+    if res.Success and res.StatusCode == 200 then
+        local HttpService = game:GetService("HttpService")
+        local data = HttpService:JSONDecode(res.Body)
+        if data[1] then
+            return data[1]
+        end
+    end
+    return {title="System", message="Unknown event", icon="ℹ️", color="blue"}
+end
+
+local function checkAdvancedKeys(hwid)
+    local res = request({
+        Url = SUPABASE_URL .. "/rest/v1/advanced_keys?hwid=eq." .. hwid,
+        Method = "GET",
+        Headers = getHeaders()
+    })
+    if res.Success and res.StatusCode == 200 then
+        local HttpService = game:GetService("HttpService")
+        local data = HttpService:JSONDecode(res.Body)
+        if data[1] then
+            return data[1]
+        end
+    end
+    return nil
+end
+
+local function checkNormalKey(key)
+    local res = request({
+        Url = SUPABASE_URL .. "/rest/v1/normal_keys?key_value=eq." .. key,
+        Method = "GET",
+        Headers = getHeaders()
+    })
+    if res.Success and res.StatusCode == 200 then
+        local HttpService = game:GetService("HttpService")
+        local data = HttpService:JSONDecode(res.Body)
+        if data[1] then
+            return data[1]
+        end
+    end
+    return nil
+end
+
+local function updateNormalKey(keyId, info)
+    local HttpService = game:GetService("HttpService")
+    request({
+        Url = SUPABASE_URL .. "/rest/v1/normal_keys?id=eq." .. keyId,
+        Method = "PATCH",
+        Headers = getHeaders(),
+        Body = HttpService:JSONEncode(info)
+    })
+end
+
+local Validator = {}
+
+function Validator.Setup(token, callback)
+    -- 1. Token kontrolü
+    local dbToken = fetchToken()
+    if not dbToken or dbToken ~= token then
+        callback(false, fetchNotification("network_error"))
+        return
+    end
+    -- 2. Sistem ayarları
+    local settings = fetchSystemSettings()
+    if not settings then
+        callback(false, fetchNotification("network_error"))
+        return
+    end
+    if settings.maintenance_mode then
+        callback(false, fetchNotification("system_disabled"))
+        return
+    end
+    local info = getSystemInfo()
+    -- 3. Advanced keys kontrolü
+    local adv = checkAdvancedKeys(info.hwid)
+    if adv then
+        if adv.is_premium then
+            callback(true, fetchNotification("user_premium"))
+            return
+        else
+            callback(false, fetchNotification("user_banned"))
+            return
+        end
+    end
+    -- 4. Keyless mod
+    if settings.is_keyless then
+        callback(true, fetchNotification("system_keyless"))
+        return
+    end
+    -- 5. Normal kullanıcı, key girmeli
+    callback(true, fetchNotification("setup_complete"))
+end
+
+function Validator.ValidateKey(token, key, callback)
+    -- 1. Token kontrolü
+    local dbToken = fetchToken()
+    if not dbToken or dbToken ~= token then
+        callback(false, fetchNotification("network_error"))
+        return
+    end
+    -- 2. Sistem ayarları
+    local settings = fetchSystemSettings()
+    if not settings then
+        callback(false, fetchNotification("network_error"))
+        return
+    end
+    if settings.maintenance_mode then
+        callback(false, fetchNotification("system_disabled"))
+        return
+    end
+    local info = getSystemInfo()
+    -- 3. Advanced keys tekrar kontrol (ban/premium bypassı engelle)
+    local adv = checkAdvancedKeys(info.hwid)
+    if adv then
+        if adv.is_premium then
+            callback(true, fetchNotification("user_premium"))
+            return
+        else
+            callback(false, fetchNotification("user_banned"))
+            return
+        end
+    end
+    -- 4. Keyless mod
+    if settings.is_keyless then
+        callback(true, fetchNotification("system_keyless"))
+        return
+    end
+    -- 5. Key kontrolü
+    if not key or key == "" then
+        local notif = fetchNotification("key_invalid")
+        notif.message = "Please enter a key"
+        callback(false, notif)
+        return
+    end
+    local keyData = checkNormalKey(key)
+    if not keyData then
+        callback(false, fetchNotification("key_invalid"))
+        return
+    end
+    -- 6. HWID kontrolü
+    if settings.is_hwid_check then
+        if keyData.hwid and keyData.hwid ~= info.hwid then
+            callback(false, fetchNotification("hwid_mismatch"))
+            return
+        end
+    end
+    -- 7. HWID güncelle (is_hwid_check false ise veya ilk kullanımda)
+    updateNormalKey(keyData.id, {
+        user_id = info.username,
+        display_name = info.displayname,
+        hwid = info.hwid,
+        executor = info.executor,
+        used_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    })
+    callback(true, fetchNotification("user_validated"))
+end
+
+return Validator
