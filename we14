@@ -1,0 +1,347 @@
+-- Kanistay Key Validator v1.2 (PATCH hatası düzeltildi)
+-- Supabase config
+local SUPABASE_URL = "https://nheljqlonhodbgpcfkww.supabase.co"
+local SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5oZWxqcWxvbmhvZGJncGNma3d3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTE5NzQ2MjQsImV4cCI6MjA2NzU1MDYyNH0.MtcA4YjKFWKsSPQMUG-SXOA1Ue1dml6v5Urdr0ISMnQ"
+
+-- DÜZELTME: Headers'ı temizledik
+local function getHeaders()
+    return {
+        ["apikey"] = SUPABASE_ANON_KEY,
+        ["Authorization"] = "Bearer " .. SUPABASE_ANON_KEY,
+        ["Content-Type"] = "application/json"
+    }
+end
+
+-- PATCH için özel headers
+local function getPatchHeaders()
+    return {
+        ["apikey"] = SUPABASE_ANON_KEY,
+        ["Authorization"] = "Bearer " .. SUPABASE_ANON_KEY,
+        ["Content-Type"] = "application/json",
+        ["Prefer"] = "return=minimal"  -- representation yerine minimal
+    }
+end
+
+local function getSystemInfo()
+    local Players = game:GetService("Players")
+    local player = Players.LocalPlayer
+    local hwid = ""
+    
+    pcall(function()
+        hwid = game:GetService("RbxAnalyticsService"):GetClientId()
+    end)
+    
+    local executor = "Unknown"
+    pcall(function()
+        if identifyexecutor then
+            executor = identifyexecutor()
+        elseif getexecutorname then
+            executor = getexecutorname()
+        end
+    end)
+    
+    return {
+        username = player.Name,
+        displayname = player.DisplayName,
+        hwid = hwid,
+        executor = executor,
+        account_age = player.AccountAge,
+        userId = player.UserId
+    }
+end
+
+local function fetchToken()
+    local res = request({
+        Url = SUPABASE_URL .. "/rest/v1/tokens?select=token_value&limit=1",
+        Method = "GET",
+        Headers = getHeaders()
+    })
+    
+    if res.StatusCode == 200 then
+        local HttpService = game:GetService("HttpService")
+        local data = HttpService:JSONDecode(res.Body)
+        if data[1] and data[1].token_value then
+            return data[1].token_value
+        end
+    end
+    return nil
+end
+
+local function fetchSystemSettings()
+    local res = request({
+        Url = SUPABASE_URL .. "/rest/v1/system_settings",
+        Method = "GET",
+        Headers = getHeaders()
+    })
+    
+    if res.StatusCode == 200 then
+        local HttpService = game:GetService("HttpService")
+        local data = HttpService:JSONDecode(res.Body)
+        local settings = {}
+        for _, row in ipairs(data) do
+            settings[row.setting_key] = row.setting_value
+        end
+        return settings
+    end
+    return nil
+end
+
+local function fetchNotification(event_type)
+    local res = request({
+        Url = SUPABASE_URL .. "/rest/v1/system_notifications?event_type=eq." .. event_type,
+        Method = "GET",
+        Headers = getHeaders()
+    })
+    
+    if res.StatusCode == 200 then
+        local HttpService = game:GetService("HttpService")
+        local data = HttpService:JSONDecode(res.Body)
+        if data[1] then
+            return data[1]
+        end
+    end
+    return {title="System", message="Unknown event", icon="ℹ️", color="blue"}
+end
+
+local function checkAdvancedKeys(hwid)
+    local res = request({
+        Url = SUPABASE_URL .. "/rest/v1/advanced_keys?hwid=eq." .. hwid,
+        Method = "GET",
+        Headers = getHeaders()
+    })
+    
+    if res.StatusCode == 200 then
+        local HttpService = game:GetService("HttpService")
+        local data = HttpService:JSONDecode(res.Body)
+        if data[1] then
+            return data[1]
+        end
+    end
+    return nil
+end
+
+local function checkNormalKey(key)
+    local res = request({
+        Url = SUPABASE_URL .. "/rest/v1/normal_keys?key_value=eq." .. key,
+        Method = "GET",
+        Headers = getHeaders()
+    })
+    
+    if res.StatusCode == 200 then
+        local HttpService = game:GetService("HttpService")
+        local data = HttpService:JSONDecode(res.Body)
+        if data[1] then
+            return data[1]
+        end
+    end
+    return nil
+end
+
+-- KALICI ÇÖZÜM: PATCH işlemi tamamen düzeltildi
+local function patchNormalKey(keyId, info)
+    local HttpService = game:GetService("HttpService")
+    
+    print("Attempting PATCH for key ID:", keyId)
+    print("PATCH data:", HttpService:JSONEncode(info))
+    
+    -- Supabase için doğru PATCH request
+    local res = request({
+        Url = SUPABASE_URL .. "/rest/v1/normal_keys?id=eq." .. keyId,
+        Method = "PATCH",
+        Headers = getPatchHeaders(),  -- Özel PATCH headers
+        Body = HttpService:JSONEncode(info)
+    })
+    
+    print("PATCH Response Status:", res.StatusCode)
+    print("PATCH Response Body:", res.Body)
+    
+    -- Başarılı status kodları: 200, 204
+    if res.StatusCode == 200 or res.StatusCode == 204 then
+        print("✅ Key updated successfully!")
+        return true
+    else
+        print("❌ PATCH failed with status:", res.StatusCode)
+        print("Error details:", res.Body)
+        return false
+    end
+end
+
+local Validator = {}
+local hazirmiyiz = false
+
+-- Rate limiting
+local validateAttempts = {}
+local validateWindow = 30 -- saniye
+local validateLimit = 4
+local StarterGui = game:GetService("StarterGui")
+
+local function showNotification(notification)
+    StarterGui:SetCore("SendNotification", {
+        Title = notification.title or "Notification",
+        Text = notification.message or "",
+        Duration = 3
+    })
+end
+
+function Validator.Setup(token, onValidated)
+    local dbToken = fetchToken()
+    if not dbToken or dbToken ~= token then
+        print("❌ Token mismatch!")
+        return false -- Token mismatch
+    end
+    
+    local settings = fetchSystemSettings()
+    if not settings then
+        showNotification(fetchNotification("network_error"))
+        return true
+    end
+    
+    if settings.maintenance_mode then
+        showNotification(fetchNotification("system_disabled"))
+        return true
+    end
+    
+    local info = getSystemInfo()
+    local adv = checkAdvancedKeys(info.hwid)
+    
+    if adv then
+        if adv.is_premium then
+            hazirmiyiz = true
+            showNotification(fetchNotification("user_premium"))
+            if onValidated then onValidated() end
+            return true
+        else
+            showNotification(fetchNotification("user_banned"))
+            return true
+        end
+    end
+    
+    if settings.is_keyless then
+        hazirmiyiz = true
+        showNotification(fetchNotification("system_keyless"))
+        if onValidated then onValidated() end
+        return true
+    end
+    
+    showNotification(fetchNotification("setup_complete"))
+    return true
+end
+
+function Validator.ValidateKey(token, key, onValidated)
+    -- Rate limit kontrolü
+    local now = os.time()
+    local userId = tostring(game:GetService("Players").LocalPlayer.UserId)
+    
+    if not validateAttempts[userId] then
+        validateAttempts[userId] = {}
+    end
+    
+    -- Eski denemeleri temizle
+    for i = #validateAttempts[userId], 1, -1 do
+        if now - validateAttempts[userId][i] > validateWindow then
+            table.remove(validateAttempts[userId], i)
+        end
+    end
+    
+    if #validateAttempts[userId] >= validateLimit then
+        showNotification({
+            title = "Rate Limit", 
+            message = "You can only validate 4 times every 30 seconds."
+        })
+        return true
+    end
+    
+    table.insert(validateAttempts[userId], now)
+    
+    -- Key input boşsa
+    if not key or key == "" then
+        showNotification({
+            title = "Key input is empty", 
+            message = "Please enter a key"
+        })
+        return true
+    end
+    
+    local dbToken = fetchToken()
+    if not dbToken or dbToken ~= token then
+        print("❌ Token mismatch during validation!")
+        return false
+    end
+    
+    local settings = fetchSystemSettings()
+    if not settings then
+        showNotification(fetchNotification("network_error"))
+        return true
+    end
+    
+    if settings.maintenance_mode then
+        showNotification(fetchNotification("system_disabled"))
+        return true
+    end
+    
+    local info = getSystemInfo()
+    local adv = checkAdvancedKeys(info.hwid)
+    
+    if adv then
+        if adv.is_premium then
+            hazirmiyiz = true
+            showNotification(fetchNotification("user_premium"))
+            if onValidated then onValidated() end
+            return true
+        else
+            showNotification(fetchNotification("user_banned"))
+            return true
+        end
+    end
+    
+    if settings.is_keyless then
+        hazirmiyiz = true
+        showNotification(fetchNotification("system_keyless"))
+        if onValidated then onValidated() end
+        return true
+    end
+    
+    local keyData = checkNormalKey(key)
+    if not keyData then
+        showNotification(fetchNotification("key_invalid"))
+        return true
+    end
+    
+    print("🔍 Key found:", keyData.key_value)
+    print("Current HWID:", keyData.hwid or "empty")
+    print("User HWID:", info.hwid)
+    
+    -- DÜZELTME: Temiz patch bilgileri
+    local patchInfo = {
+        user_name = info.username,
+        display_name = info.displayname,
+        hwid = info.hwid,
+        age = tostring(info.account_age) .. "d",
+        executor = info.executor,
+        status = "active",
+        used_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    }
+    
+    -- İlk kullanım veya aynı HWID kontrolü
+    if (not keyData.hwid or keyData.hwid == "") or keyData.hwid == info.hwid then
+        print("✅ Key validation allowed, attempting PATCH...")
+        local success = patchNormalKey(keyData.id, patchInfo)
+        
+        if success then
+            hazirmiyiz = true
+            showNotification(fetchNotification("user_validated"))
+            if onValidated then onValidated() end
+            print("🎉 Validation successful!")
+        else
+            showNotification(fetchNotification("network_error"))
+            print("❌ PATCH failed, showing network error")
+        end
+    else
+        showNotification(fetchNotification("key_used"))
+        print("❌ Key already used by different HWID")
+    end
+    
+    return true
+end
+
+return Validator
